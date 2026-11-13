@@ -85,7 +85,7 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="relative flex min-h-screen flex-col overflow-x-hidden overflow-y-auto bg-[#fbf5f0]">
+    <div className="relative flex min-h-screen flex-col overflow-x-hidden bg-[#fbf5f0]">
       {/* Decorative blobs */}
       <div className="pointer-events-none absolute -left-24 top-10 h-72 w-72 rounded-full bg-[#f3d4cb] opacity-50 blur-3xl pp-float" />
       <div className="pointer-events-none absolute -right-20 bottom-20 h-80 w-80 rounded-full bg-[#cdd9c5] opacity-40 blur-3xl pp-float-slow" />
