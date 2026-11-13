@@ -4,6 +4,7 @@ import Intro from '@/components/Intro';
 import Landing from '@/components/Landing';
 import AuthScreen from '@/components/AuthScreen';
 import Dashboard from '@/components/Dashboard';
+import DocumentScanner from '@/components/DocumentScanner';
 import Onboarding from '@/components/Onboarding';
 import ProtectedRoute from '@/components/ProtectedRoute';
 import { AuthProvider } from '@/context/AuthContext';
@@ -57,6 +58,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <Dashboard />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/scanner"
+        element={
+          <ProtectedRoute>
+            <DocumentScanner />
           </ProtectedRoute>
         }
       />

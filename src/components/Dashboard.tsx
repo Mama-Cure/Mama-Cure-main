@@ -141,7 +141,13 @@ export default function Dashboard() {
               <button
                 type="button"
                 key={title}
-                onClick={() => setSelectedFeature(title)}
+                onClick={() => {
+                  if (title === 'AI Document Scanner') {
+                    navigate('/scanner');
+                  } else {
+                    setSelectedFeature(title);
+                  }
+                }}
                 className="flex min-h-40 flex-col items-center justify-center gap-5 rounded-2xl border border-[#e9ded5] bg-white/75 p-6 text-center shadow-sm backdrop-blur transition-all duration-300 hover:-translate-y-1 hover:border-[#e8a5a0]/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c97b76] focus-visible:ring-offset-2 focus-visible:ring-offset-[#fbf5f0] pp-reveal"
                 style={{ ['--pp-delay' as string]: `${350 + index * 75}ms` }}
               >
