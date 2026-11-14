@@ -127,16 +127,6 @@ function getTimeSummaries(medication: Medication) {
   return [];
 }
 
-const nativeWeekdayNumbers: Record<Weekday, 1 | 2 | 3 | 4 | 5 | 6 | 7> = {
-  Sun: 1,
-  Mon: 2,
-  Tue: 3,
-  Wed: 4,
-  Thu: 5,
-  Fri: 6,
-  Sat: 7,
-};
-
 function createNotificationId(value: string, reservedIds: Set<number>) {
   let hash = 2166136261;
   for (const character of value) {
@@ -189,10 +179,16 @@ async function cancelMedicationNotifications(userId: string, medication: Medicat
     medication.commonTimes,
     medication.customTimes,
   );
-  const ids = getMedicationNotificationIds(userId, medication.id, entries);
-  if (ids.length > 0) {
+  const ids = new Set(getMedicationNotificationIds(userId, medication.id, entries));
+  const pending = await LocalNotifications.getPending();
+  for (const notification of pending.notifications) {
+    if (notification.extra?.userId === userId && notification.extra?.medicationId === medication.id) {
+      ids.add(notification.id);
+    }
+  }
+  if (ids.size > 0) {
     await LocalNotifications.cancel({
-      notifications: ids.map((id) => ({ id })),
+      notifications: [...ids].map((id) => ({ id })),
     });
   }
 }
@@ -203,32 +199,57 @@ async function scheduleMedicationNotifications(
   timing: TimingDraft,
 ) {
   const notifications: LocalNotificationSchema[] = [];
+  const reservedIds = new Set<number>();
+  const now = new Date();
 
-  const entries = getNotificationEntries(timing.days, timing.timingMode, timing.commonTimes, timing.customTimes);
-  const ids = getMedicationNotificationIds(userId, medication.id, entries);
-  for (const [index, { day, time }] of entries.entries()) {
-    const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
-    if (!match) throw new Error(`The saved time "${time}" is not valid.`);
-    notifications.push({
-      id: ids[index],
-      title: medication.name,
-      body: `Scheduled time: ${formatTime(time)}`,
-      schedule: {
-        on: {
-          weekday: nativeWeekdayNumbers[day],
-          hour: Number(match[1]),
-          minute: Number(match[2]),
-        },
-        allowWhileIdle: true,
-      },
-      isExactNotification: true,
-      isExactMandatory: true,
-    });
+  for (let dayOffset = 0; dayOffset < 14; dayOffset += 1) {
+    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset);
+    const dateKey = [
+      date.getFullYear(),
+      String(date.getMonth() + 1).padStart(2, '0'),
+      String(date.getDate()).padStart(2, '0'),
+    ].join('-');
+    if (dateKey < timing.fromDate || (!timing.indefinite && timing.toDate && dateKey > timing.toDate)) continue;
+
+    const day = weekdays[(date.getDay() + 6) % 7];
+    if (!timing.days.includes(day)) continue;
+
+    const times = timing.timingMode === 'common'
+      ? timing.commonTimes
+      : timing.timingMode === 'custom'
+        ? timing.customTimes[day] ?? []
+        : [];
+    for (const time of times) {
+      const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
+      if (!match) throw new Error(`The saved time "${time}" is not valid.`);
+      const at = new Date(
+        date.getFullYear(),
+        date.getMonth(),
+        date.getDate(),
+        Number(match[1]),
+        Number(match[2]),
+      );
+      if (at <= now) continue;
+
+      notifications.push({
+        id: createNotificationId(
+          JSON.stringify([userId, medication.id, dateKey, time]),
+          reservedIds,
+        ),
+        title: 'Medication Reminder',
+        body: `Time to take ${medication.name}`,
+        channelId: 'med-alarms',
+        schedule: { at, allowWhileIdle: true },
+        isExactNotification: true,
+        isExactMandatory: true,
+        extra: { userId, medicationId: medication.id },
+      });
+    }
   }
 
-  if (notifications.length > 0) {
-    await LocalNotifications.schedule({ notifications });
-  }
+  if (notifications.length === 0) return 0;
+  const result = await LocalNotifications.schedule({ notifications });
+  return result.notifications.length;
 }
 
 export default function MedicationManagement() {
@@ -539,27 +560,40 @@ export default function MedicationManagement() {
 
     setSavingTimingMedicationId(medication.id);
     setError('');
+    let timingsSaved = false;
     try {
       const isNativePlatform = Capacitor.isNativePlatform();
       if (isNativePlatform) {
         await cancelMedicationNotifications(user.uid, medication);
       }
+      const timingToSave: TimingDraft = {
+        ...draft,
+        toDate: draft.indefinite ? '' : draft.toDate,
+        days,
+        commonTimes,
+        customTimes,
+      };
       await updateDoc(doc(db, 'users', user.uid, 'medications', medication.id), {
         hasTimings: true,
-        startDate: draft.fromDate,
-        endDate: draft.indefinite ? '' : draft.toDate,
-        isIndefinite: draft.indefinite,
-        days,
-        timingMode: draft.timingMode,
+        startDate: timingToSave.fromDate,
+        endDate: timingToSave.toDate,
+        isIndefinite: timingToSave.indefinite,
+        days: timingToSave.days,
+        timingMode: timingToSave.timingMode,
         commonTimes,
         customTimes,
       });
+      timingsSaved = true;
       if (isNativePlatform) {
-        await scheduleMedicationNotifications(user.uid, medication, draft);
+        const scheduledCount = await scheduleMedicationNotifications(user.uid, medication, timingToSave);
+        window.alert(`Scheduled ${scheduledCount} phone alarms.`);
       }
       setOpenTimingMedicationId(null);
     } catch (saveError) {
-      setError(`Unable to save timings: ${saveError instanceof Error ? saveError.message : 'Please try again.'}`);
+      const reason = saveError instanceof Error ? saveError.message : 'Please try again.';
+      setError(timingsSaved
+        ? `Timings were saved, but native phone alarms could not be scheduled: ${reason}`
+        : `Unable to save timings: ${reason}`);
     } finally {
       setSavingTimingMedicationId(null);
     }

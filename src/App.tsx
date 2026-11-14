@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Capacitor } from '@capacitor/core';
+import { LocalNotifications } from '@capacitor/local-notifications';
 import Intro from '@/components/Intro';
 import Landing from '@/components/Landing';
 import AuthScreen from '@/components/AuthScreen';
@@ -107,6 +109,32 @@ function AppRoutes() {
 }
 
 export default function App() {
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') return;
+
+    const requestAlarmPermissions = async () => {
+      try {
+        await LocalNotifications.requestPermissions();
+        const exactAlarmSetting = await LocalNotifications.checkExactNotificationSetting();
+        if (exactAlarmSetting.exact_alarm !== 'granted') {
+          await LocalNotifications.changeExactNotificationSetting();
+        }
+        await LocalNotifications.createChannel({
+          id: 'med-alarms',
+          name: 'Medication Alarms',
+          importance: 5,
+          visibility: 1,
+          sound: 'default',
+          vibration: true,
+        });
+      } catch (permissionError) {
+        console.error('Unable to initialize Android medication alarm permissions:', permissionError);
+      }
+    };
+
+    void requestAlarmPermissions();
+  }, []);
+
   return (
     <AuthProvider>
       <BrowserRouter>

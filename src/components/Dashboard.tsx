@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { signOut } from 'firebase/auth';
-import { Capacitor } from '@capacitor/core';
-import { LocalNotifications } from '@capacitor/local-notifications';
 import { auth } from '@/firebase';
 import { useAuth } from '@/context/AuthContext';
 import {
@@ -77,24 +75,6 @@ export default function Dashboard() {
     } catch (permissionError) {
       console.warn('Notification permission could not be requested.', permissionError);
     }
-  }, []);
-
-  useEffect(() => {
-    if (!Capacitor.isNativePlatform()) return;
-
-    void (async () => {
-      try {
-        await LocalNotifications.requestPermissions();
-        if (Capacitor.getPlatform() === 'android') {
-          const exactAlarmPermission = await LocalNotifications.checkExactNotificationSetting();
-          if (exactAlarmPermission.exact_alarm !== 'granted') {
-            await LocalNotifications.changeExactNotificationSetting();
-          }
-        }
-      } catch (permissionError) {
-        console.warn('Native medication alarm permissions could not be requested.', permissionError);
-      }
-    })();
   }, []);
 
   useEffect(() => {
