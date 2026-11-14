@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">MamaCure</string>
+    <string name="title_activity_main">MamaCure</string>
+    <string name="package_name">com.mamacure.app</string>
+    <string name="custom_url_scheme">com.mamacure.app</string>
+</resources>

@@ -1,5 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Capacitor } from '@capacitor/core';
+import { LocalNotifications, type LocalNotificationSchema } from '@capacitor/local-notifications';
 import {
   addDoc,
   collection,
@@ -12,7 +14,8 @@ import {
   updateDoc,
   where,
 } from 'firebase/firestore';
-import { ArrowLeft, Clock3, Pencil, Pill, Plus, Trash2, X } from 'lucide-react';
+import { ArrowLeft, Clock3, Pencil, Pill, Plus, Trash2, Volume2, X } from 'lucide-react';
+import { MEDICATION_ALARM_TEST_EVENT } from '@/components/MedicationAlarm';
 import { useAuth } from '@/context/AuthContext';
 import { db } from '@/firebase';
 import LogoBadge from '@/components/LogoBadge';
@@ -122,6 +125,110 @@ function getTimeSummaries(medication: Medication) {
     });
   }
   return [];
+}
+
+const nativeWeekdayNumbers: Record<Weekday, 1 | 2 | 3 | 4 | 5 | 6 | 7> = {
+  Sun: 1,
+  Mon: 2,
+  Tue: 3,
+  Wed: 4,
+  Thu: 5,
+  Fri: 6,
+  Sat: 7,
+};
+
+function createNotificationId(value: string, reservedIds: Set<number>) {
+  let hash = 2166136261;
+  for (const character of value) {
+    hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
+  }
+  let id = (hash >>> 0) % 2147483647 + 1;
+  while (reservedIds.has(id)) id = id === 2147483647 ? 1 : id + 1;
+  reservedIds.add(id);
+  return id;
+}
+
+type NotificationEntry = { day: Weekday; time: string };
+
+function getNotificationEntries(
+  days: Weekday[],
+  timingMode: TimingMode | null,
+  commonTimes: string[],
+  customTimes: Partial<Record<Weekday, string[]>>,
+) {
+  const entries: NotificationEntry[] = [];
+  const seen = new Set<string>();
+  for (const day of weekdays) {
+    if (!days.includes(day)) continue;
+    const times = timingMode === 'common' ? commonTimes : customTimes[day] ?? [];
+    for (const time of times) {
+      const key = JSON.stringify([day, time]);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      entries.push({ day, time });
+    }
+  }
+  return entries;
+}
+
+function getMedicationNotificationIds(
+  userId: string,
+  medicationId: string,
+  entries: NotificationEntry[],
+) {
+  const usedIds = new Set<number>();
+  return entries.map(({ day, time }) =>
+    createNotificationId(JSON.stringify([userId, medicationId, day, time]), usedIds),
+  );
+}
+
+async function cancelMedicationNotifications(userId: string, medication: Medication) {
+  const entries = getNotificationEntries(
+    medication.days,
+    medication.timingMode,
+    medication.commonTimes,
+    medication.customTimes,
+  );
+  const ids = getMedicationNotificationIds(userId, medication.id, entries);
+  if (ids.length > 0) {
+    await LocalNotifications.cancel({
+      notifications: ids.map((id) => ({ id })),
+    });
+  }
+}
+
+async function scheduleMedicationNotifications(
+  userId: string,
+  medication: Medication,
+  timing: TimingDraft,
+) {
+  const notifications: LocalNotificationSchema[] = [];
+
+  const entries = getNotificationEntries(timing.days, timing.timingMode, timing.commonTimes, timing.customTimes);
+  const ids = getMedicationNotificationIds(userId, medication.id, entries);
+  for (const [index, { day, time }] of entries.entries()) {
+    const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
+    if (!match) throw new Error(`The saved time "${time}" is not valid.`);
+    notifications.push({
+      id: ids[index],
+      title: medication.name,
+      body: `Scheduled time: ${formatTime(time)}`,
+      schedule: {
+        on: {
+          weekday: nativeWeekdayNumbers[day],
+          hour: Number(match[1]),
+          minute: Number(match[2]),
+        },
+        allowWhileIdle: true,
+      },
+      isExactNotification: true,
+      isExactMandatory: true,
+    });
+  }
+
+  if (notifications.length > 0) {
+    await LocalNotifications.schedule({ notifications });
+  }
 }
 
 export default function MedicationManagement() {
@@ -380,6 +487,9 @@ export default function MedicationManagement() {
     setDeletingMedicationId(medication.id);
     setError('');
     try {
+      if (Capacitor.isNativePlatform()) {
+        await cancelMedicationNotifications(user.uid, medication);
+      }
       await deleteDoc(doc(db, 'users', user.uid, 'medications', medication.id));
       if (editingMedicationId === medication.id) setEditingMedicationId(null);
       if (openTimingMedicationId === medication.id) setOpenTimingMedicationId(null);
@@ -430,6 +540,10 @@ export default function MedicationManagement() {
     setSavingTimingMedicationId(medication.id);
     setError('');
     try {
+      const isNativePlatform = Capacitor.isNativePlatform();
+      if (isNativePlatform) {
+        await cancelMedicationNotifications(user.uid, medication);
+      }
       await updateDoc(doc(db, 'users', user.uid, 'medications', medication.id), {
         hasTimings: true,
         startDate: draft.fromDate,
@@ -440,6 +554,9 @@ export default function MedicationManagement() {
         commonTimes,
         customTimes,
       });
+      if (isNativePlatform) {
+        await scheduleMedicationNotifications(user.uid, medication, draft);
+      }
       setOpenTimingMedicationId(null);
     } catch (saveError) {
       setError(`Unable to save timings: ${saveError instanceof Error ? saveError.message : 'Please try again.'}`);
@@ -455,14 +572,24 @@ export default function MedicationManagement() {
 
       <header className="relative z-10 flex items-center justify-between px-6 py-6 sm:px-12">
         <LogoBadge className="h-12" />
-        <button
-          type="button"
-          onClick={() => navigate('/dashboard')}
-          className="inline-flex items-center gap-2 rounded-full border border-[#d8ccc2] bg-white/80 px-4 py-2.5 text-sm font-medium text-[#4a4540] backdrop-blur transition-colors hover:border-[#c97b76] hover:text-[#c97b76] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c97b76]"
-        >
-          <ArrowLeft className="h-4 w-4" strokeWidth={1.7} />
-          Back to dashboard
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new Event(MEDICATION_ALARM_TEST_EVENT))}
+            className="inline-flex items-center gap-1.5 rounded-full border border-[#d8ccc2] bg-white/70 px-3 py-2 text-xs font-medium text-[#6b655d] backdrop-blur transition-colors hover:border-[#c97b76] hover:text-[#c97b76] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c97b76]"
+          >
+            <Volume2 className="h-3.5 w-3.5" />
+            Test Alarm
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate('/dashboard')}
+            className="inline-flex items-center gap-2 rounded-full border border-[#d8ccc2] bg-white/80 px-4 py-2.5 text-sm font-medium text-[#4a4540] backdrop-blur transition-colors hover:border-[#c97b76] hover:text-[#c97b76] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c97b76]"
+          >
+            <ArrowLeft className="h-4 w-4" strokeWidth={1.7} />
+            Back to dashboard
+          </button>
+        </div>
       </header>
 
       <main className="relative z-10 px-6 pb-16 pt-6 sm:px-12">

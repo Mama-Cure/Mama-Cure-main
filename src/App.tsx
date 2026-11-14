@@ -6,6 +6,7 @@ import AuthScreen from '@/components/AuthScreen';
 import Dashboard from '@/components/Dashboard';
 import DocumentScanner from '@/components/DocumentScanner';
 import MedicationManagement from '@/components/MedicationManagement';
+import MedicationAlarm from '@/components/MedicationAlarm';
 import Onboarding from '@/components/Onboarding';
 import ProtectedRoute from '@/components/ProtectedRoute';
 import { AuthProvider } from '@/context/AuthContext';
@@ -88,6 +89,7 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter>
         <AppRoutes />
+        <MedicationAlarm />
       </BrowserRouter>
     </AuthProvider>
   );
