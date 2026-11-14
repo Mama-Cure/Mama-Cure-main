@@ -692,6 +692,9 @@ export default function MedicationManagement() {
         commonTimes,
         customTimes,
       };
+      const timingConfirmation = timingUpdate.hasTimings
+        ? `Alarm set for ${medication.name}`
+        : `Alarm turned off for ${medication.name}`;
 
       if (nativeAlarmBridge) {
         const nativeAlarmPlan = getNativeMedicationAlarmPlan(user.uid, medication, timingToSave);
@@ -727,15 +730,15 @@ export default function MedicationManagement() {
           }
           throw scheduleError;
         }
-        window.alert(`Scheduled ${nativeAlarmPlan.length} native full-screen alarms.`);
+        window.alert(timingConfirmation);
       } else {
         await updateDoc(medicationRef, timingUpdate);
         timingsSaved = true;
       }
 
       if (isNativePlatform && !nativeAlarmBridge) {
-        const scheduledCount = await scheduleMedicationNotifications(user.uid, medication, timingToSave);
-        window.alert(`Scheduled ${scheduledCount} phone alarms.`);
+        await scheduleMedicationNotifications(user.uid, medication, timingToSave);
+        window.alert(timingConfirmation);
       }
       setOpenTimingMedicationId(null);
     } catch (saveError) {
