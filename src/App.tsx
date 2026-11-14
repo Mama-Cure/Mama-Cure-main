@@ -5,6 +5,7 @@ import Landing from '@/components/Landing';
 import AuthScreen from '@/components/AuthScreen';
 import Dashboard from '@/components/Dashboard';
 import DocumentScanner from '@/components/DocumentScanner';
+import MedicationManagement from '@/components/MedicationManagement';
 import Onboarding from '@/components/Onboarding';
 import ProtectedRoute from '@/components/ProtectedRoute';
 import { AuthProvider } from '@/context/AuthContext';
@@ -66,6 +67,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <DocumentScanner />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/medications"
+        element={
+          <ProtectedRoute>
+            <MedicationManagement />
           </ProtectedRoute>
         }
       />

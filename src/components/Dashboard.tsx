@@ -142,7 +142,9 @@ export default function Dashboard() {
                 type="button"
                 key={title}
                 onClick={() => {
-                  if (title === 'AI Document Scanner') {
+                  if (title === 'Medication Management') {
+                    navigate('/medications');
+                  } else if (title === 'AI Document Scanner') {
                     navigate('/scanner');
                   } else {
                     setSelectedFeature(title);
