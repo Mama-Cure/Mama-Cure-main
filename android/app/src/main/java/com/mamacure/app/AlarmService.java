@@ -10,6 +10,8 @@ import android.content.pm.ServiceInfo;
 import android.content.res.AssetFileDescriptor;
 import android.media.AudioAttributes;
 import android.media.MediaPlayer;
+import android.media.RingtoneManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
@@ -108,27 +110,20 @@ public final class AlarmService extends Service {
         releaseMediaPlayer();
         MediaPlayer player = new MediaPlayer();
         try {
-            player.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK);
-            player.setAudioAttributes(new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build());
-            AssetFileDescriptor sound = getResources().openRawResourceFd(R.raw.alarm);
-            if (sound == null) throw new IOException("Alarm sound resource is unavailable.");
             try {
-                player.setDataSource(sound.getFileDescriptor(), sound.getStartOffset(), sound.getLength());
-            } finally {
-                sound.close();
+                configureAlarmPlayer(player);
+                AssetFileDescriptor sound = getResources().openRawResourceFd(R.raw.alarm);
+                if (sound == null) throw new IOException("Alarm sound resource is unavailable.");
+                try {
+                    player.setDataSource(sound.getFileDescriptor(), sound.getStartOffset(), sound.getLength());
+                } finally {
+                    sound.close();
+                }
+                prepareAndStart(player);
+            } catch (IOException | RuntimeException rawError) {
+                Log.w(TAG, "Bundled alarm audio could not be played; trying system alarm sounds.", rawError);
+                startFallbackAlarm(player);
             }
-            player.setLooping(true);
-            player.setVolume(1.0f, 1.0f);
-            player.setOnErrorListener((mediaPlayer, what, extra) -> {
-                Log.e(TAG, "Medication alarm audio playback failed: " + what + ", " + extra);
-                stopSelf();
-                return true;
-            });
-            player.prepare();
-            player.start();
             mediaPlayer = player;
             return true;
         } catch (IOException | RuntimeException error) {
@@ -136,6 +131,55 @@ public final class AlarmService extends Service {
             player.release();
             return false;
         }
+    }
+
+    private void configureAlarmPlayer(MediaPlayer player) {
+        player.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK);
+        player.setAudioAttributes(new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ALARM)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build());
+        player.setOnErrorListener((mediaPlayer, what, extra) -> {
+            Log.e(TAG, "Medication alarm audio playback failed: " + what + ", " + extra);
+            stopSelf();
+            return true;
+        });
+    }
+
+    private void prepareAndStart(MediaPlayer player) throws IOException {
+        player.setLooping(true);
+        player.setVolume(1.0f, 1.0f);
+        player.prepare();
+        player.start();
+    }
+
+    private void startFallbackAlarm(MediaPlayer player) throws IOException {
+        Uri alarmUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
+        Uri ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
+        Uri[] fallbackUris = alarmUri == null || alarmUri.equals(ringtoneUri)
+                ? new Uri[] {ringtoneUri}
+                : new Uri[] {alarmUri, ringtoneUri};
+        IOException lastIoError = null;
+
+        for (Uri fallbackUri : fallbackUris) {
+            if (fallbackUri == null) continue;
+
+            try {
+                player.reset();
+                configureAlarmPlayer(player);
+                player.setDataSource(this, fallbackUri);
+                prepareAndStart(player);
+                return;
+            } catch (IOException | RuntimeException fallbackError) {
+                Log.w(TAG, "System alarm audio source could not be played: " + fallbackUri, fallbackError);
+                if (fallbackError instanceof IOException) {
+                    lastIoError = (IOException) fallbackError;
+                }
+            }
+        }
+
+        if (lastIoError != null) throw lastIoError;
+        throw new IOException("No usable default alarm or ringtone sound is available.");
     }
 
     private void startVibration() {
