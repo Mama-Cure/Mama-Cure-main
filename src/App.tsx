@@ -9,15 +9,30 @@ import MedicationManagement from '@/components/MedicationManagement';
 import MedicationAlarm from '@/components/MedicationAlarm';
 import Onboarding from '@/components/Onboarding';
 import ProtectedRoute from '@/components/ProtectedRoute';
-import { AuthProvider } from '@/context/AuthContext';
+import { AuthProvider, useAuth } from '@/context/AuthContext';
 
 const INTRO_REVEAL_AT = 2700;
 
+function AuthLoadingScreen() {
+  return (
+    <div role="status" className="flex min-h-screen items-center justify-center bg-[#fbf5f0]">
+      <span className="h-10 w-10 animate-spin rounded-full border-[3px] border-[#e8a5a0] border-t-[#c97b76]" />
+      <span className="sr-only">Checking your session...</span>
+    </div>
+  );
+}
+
 function AppRoutes() {
   const location = useLocation();
+  const { user, loading } = useAuth();
   const isHome = location.pathname === '/';
   const [showLanding, setShowLanding] = useState(false);
   const [showIntro, setShowIntro] = useState(isHome);
+  const authScreen = loading
+    ? <AuthLoadingScreen />
+    : user
+      ? <Navigate to="/dashboard" replace />
+      : <AuthScreen />;
 
   useEffect(() => {
     if (!isHome) {
@@ -40,13 +55,20 @@ function AppRoutes() {
       <Route
         path="/"
         element={
-          <>
-            {showLanding && <Landing />}
-            {showIntro && <Intro onFinish={() => setShowIntro(false)} />}
-          </>
+          loading ? (
+            <AuthLoadingScreen />
+          ) : user ? (
+            <Navigate to="/dashboard" replace />
+          ) : (
+            <>
+              {showLanding && <Landing />}
+              {showIntro && <Intro onFinish={() => setShowIntro(false)} />}
+            </>
+          )
         }
       />
-      <Route path="/auth" element={<AuthScreen />} />
+      <Route path="/auth" element={authScreen} />
+      <Route path="/login" element={authScreen} />
       <Route
         path="/onboarding"
         element={
