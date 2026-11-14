@@ -120,12 +120,14 @@ export default function App() {
           await LocalNotifications.changeExactNotificationSetting();
         }
         await LocalNotifications.createChannel({
-          id: 'med-alarms',
-          name: 'Medication Alarms',
+          id: 'med-alarms-v2',
+          name: 'Medication Alarms Loud',
+          description: 'Loud medication reminder alarms',
           importance: 5,
           visibility: 1,
-          sound: 'default',
+          sound: 'alarm.mp3',
           vibration: true,
+          lights: true,
         });
       } catch (permissionError) {
         console.error('Unable to initialize Android medication alarm permissions:', permissionError);

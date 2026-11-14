@@ -8,6 +8,13 @@ const config: CapacitorConfig = {
     url: 'https://mamacure.netlify.app',
     cleartext: true,
   },
+  plugins: {
+    SplashScreen: {
+      launchShowDuration: 0,
+      launchAutoHide: true,
+      showSpinner: false,
+    },
+  },
 };
 
 export default config;
