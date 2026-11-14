@@ -77,6 +77,11 @@ function getCustomTimes(value: unknown): Partial<Record<Weekday, string[]>> {
   return times;
 }
 
+function getNotificationMetadata(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return {};
+  return value as Record<string, unknown>;
+}
+
 function getSavedTimingDraft(medication: Medication): TimingDraft {
   return {
     fromDate: medication.startDate,
@@ -180,16 +185,32 @@ async function cancelMedicationNotifications(userId: string, medication: Medicat
     medication.customTimes,
   );
   const ids = new Set(getMedicationNotificationIds(userId, medication.id, entries));
-  const pending = await LocalNotifications.getPending();
+  const [pending, delivered] = await Promise.all([
+    LocalNotifications.getPending(),
+    LocalNotifications.getDeliveredNotifications(),
+  ]);
+  const belongsToMedication = (value: unknown) => {
+    const metadata = getNotificationMetadata(value);
+    const nestedMetadata = getNotificationMetadata(metadata.extra);
+    return [metadata, nestedMetadata].some((item) =>
+      item.userId === userId && item.medicationId === medication.id,
+    );
+  };
   for (const notification of pending.notifications) {
-    if (notification.extra?.userId === userId && notification.extra?.medicationId === medication.id) {
+    if (belongsToMedication(notification.extra)) {
       ids.add(notification.id);
     }
   }
+  const deliveredIds = delivered.notifications
+    .filter((notification) => belongsToMedication(notification.data) || belongsToMedication(notification.extra))
+    .map(({ id }) => id);
   if (ids.size > 0) {
     await LocalNotifications.cancel({
       notifications: [...ids].map((id) => ({ id })),
     });
+  }
+  if (deliveredIds.length > 0) {
+    await LocalNotifications.removeDeliveredNotificationsById({ ids: deliveredIds });
   }
 }
 
@@ -231,20 +252,35 @@ async function scheduleMedicationNotifications(
       );
       if (at <= now) continue;
 
-      notifications.push({
-        id: createNotificationId(
-          JSON.stringify([userId, medication.id, dateKey, time]),
-          reservedIds,
-        ),
-        title: 'Medication Reminder',
-        body: `Time to take ${medication.name}`,
-        channelId: 'med-alarms-v2',
-        sound: 'alarm.mp3',
-        schedule: { at, allowWhileIdle: true },
-        isExactNotification: true,
-        isExactMandatory: true,
-        extra: { userId, medicationId: medication.id },
-      });
+      const alarmKey = JSON.stringify([medication.id, dateKey, time]);
+      for (let followUpMinute = 0; followUpMinute < 3; followUpMinute += 1) {
+        notifications.push({
+          id: createNotificationId(
+            JSON.stringify([userId, medication.id, dateKey, time, followUpMinute]),
+            reservedIds,
+          ),
+          title: 'Medication Reminder',
+          body: `Time to take ${medication.name}`,
+          channelId: 'med-alarms-v2',
+          sound: 'alarm.mp3',
+          schedule: {
+            at: new Date(at.getTime() + followUpMinute * 60_000),
+            allowWhileIdle: true,
+          },
+          isExactNotification: true,
+          isExactMandatory: true,
+          ongoing: true,
+          autoCancel: false,
+          extra: {
+            userId,
+            medicationId: medication.id,
+            medicationName: medication.name,
+            scheduledDate: dateKey,
+            scheduledTime: time,
+            alarmKey,
+          },
+        });
+      }
     }
   }
 

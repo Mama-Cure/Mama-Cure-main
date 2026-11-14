@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { LocalNotifications } from '@capacitor/local-notifications';
 import { collection, onSnapshot } from 'firebase/firestore';
 import { BellRing, Volume2 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
@@ -27,8 +29,10 @@ type ScheduledMedication = {
 type ActiveAlarm = {
   key: string;
   medicationId: string;
+  userId: string;
   name: string;
   time: string;
+  notificationId?: number;
 };
 
 function isWeekday(value: unknown): value is Weekday {
@@ -72,35 +76,39 @@ function isAlarmKeyArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
-function getOrCreateAudioContext(contextRef: { current: AudioContext | null }) {
-  if (typeof window === 'undefined' || typeof window.AudioContext !== 'function') {
-    throw new Error('Web Audio is not supported in this browser.');
-  }
-  if (contextRef.current?.state === 'closed') contextRef.current = null;
-  contextRef.current ??= new window.AudioContext();
-  return contextRef.current;
+function getNotificationMetadata(value: unknown) {
+  if (typeof value !== 'object' || value === null) return {};
+  return value as Record<string, unknown>;
 }
 
-function playChimeSequence(audioContext: AudioContext) {
-  const startAt = audioContext.currentTime;
-  [659.25, 783.99, 987.77].forEach((frequency, index) => {
-    const start = startAt + index * 0.18;
-    const oscillator = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-    oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(frequency, start);
-    gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.exponentialRampToValueAtTime(0.12, start + 0.03);
-    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.42);
-    oscillator.connect(gain);
-    gain.connect(audioContext.destination);
-    oscillator.onended = () => {
-      oscillator.disconnect();
-      gain.disconnect();
-    };
-    oscillator.start(start);
-    oscillator.stop(start + 0.44);
-  });
+async function cancelAlarmNotifications(userId: string, alarmKey: string, notificationId?: number) {
+  if (!Capacitor.isNativePlatform()) return;
+
+  const [pending, delivered] = await Promise.all([
+    LocalNotifications.getPending(),
+    LocalNotifications.getDeliveredNotifications(),
+  ]);
+  const matchesAlarm = (value: unknown) => {
+    const metadata = getNotificationMetadata(value);
+    const nestedMetadata = getNotificationMetadata(metadata.extra);
+    return [metadata, nestedMetadata].some((item) => item.userId === userId && item.alarmKey === alarmKey);
+  };
+  const pendingIds = pending.notifications
+    .filter((notification) => matchesAlarm(notification.extra))
+    .map(({ id }) => id);
+  if (pendingIds.length > 0) {
+    await LocalNotifications.cancel({ notifications: pendingIds.map((id) => ({ id })) });
+  }
+
+  const deliveredIds = new Set(
+    delivered.notifications
+      .filter((notification) => matchesAlarm(notification.data) || matchesAlarm(notification.extra))
+      .map(({ id }) => id),
+  );
+  if (notificationId !== undefined) deliveredIds.add(notificationId);
+  if (deliveredIds.size > 0) {
+    await LocalNotifications.removeDeliveredNotificationsById({ ids: [...deliveredIds] });
+  }
 }
 
 export default function MedicationAlarm() {
@@ -108,7 +116,7 @@ export default function MedicationAlarm() {
   const userId = user?.uid;
   const medicationsRef = useRef<ScheduledMedication[]>([]);
   const triggeredKeysRef = useRef<Set<string>>(new Set());
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const alarmAudioRef = useRef<HTMLAudioElement | null>(null);
   const [triggeredKeys, setTriggeredKeys] = useState<Set<string>>(new Set());
   const [historyReady, setHistoryReady] = useState(false);
   const [activeAlarms, setActiveAlarms] = useState<ActiveAlarm[]>([]);
@@ -117,8 +125,16 @@ export default function MedicationAlarm() {
   const [audioError, setAudioError] = useState('');
   const [audioRetry, setAudioRetry] = useState(0);
 
+  const activeAlarmsRef = useRef(activeAlarms);
+  activeAlarmsRef.current = activeAlarms;
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
+
+    const audio = new Audio('/alarm.mp3');
+    audio.loop = true;
+    audio.preload = 'auto';
+    alarmAudioRef.current = audio;
 
     let unlocked = false;
     const unlockAudio = () => {
@@ -126,16 +142,21 @@ export default function MedicationAlarm() {
       unlocked = true;
       window.removeEventListener('click', unlockAudio);
       window.removeEventListener('touchstart', unlockAudio);
-      try {
-        const audioContext = getOrCreateAudioContext(audioContextRef);
-        if (audioContext.state !== 'running') {
-          void audioContext.resume().catch((error: unknown) => {
-            console.warn('Medication alarm audio could not be unlocked.', error);
-          });
+      if (!audio.paused) return;
+      const wasMuted = audio.muted;
+      audio.muted = true;
+      void audio.play().then(() => {
+        audio.pause();
+        audio.currentTime = 0;
+        audio.muted = wasMuted;
+        if (activeAlarmsRef.current.length > 0) {
+          audio.loop = true;
+          return audio.play();
         }
-      } catch (error) {
+      }).catch((error: unknown) => {
+        audio.muted = wasMuted;
         console.warn('Medication alarm audio could not be unlocked.', error);
-      }
+      });
     };
 
     window.addEventListener('click', unlockAudio);
@@ -143,32 +164,23 @@ export default function MedicationAlarm() {
     return () => {
       window.removeEventListener('click', unlockAudio);
       window.removeEventListener('touchstart', unlockAudio);
-      const audioContext = audioContextRef.current;
-      audioContextRef.current = null;
-      if (audioContext && audioContext.state !== 'closed') {
-        void audioContext.close().catch((error: unknown) => {
-          console.warn('Medication alarm audio context could not be closed.', error);
-        });
-      }
+      audio.pause();
+      alarmAudioRef.current = null;
     };
   }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const playTestChime = () => {
-      try {
-        const audioContext = getOrCreateAudioContext(audioContextRef);
-        void audioContext.resume().then(() => {
-          if (audioContext.state === 'running') {
-            setAudioError('');
-            playChimeSequence(audioContext);
-          }
-        }).catch((error: unknown) => {
-          setAudioError(`Alarm audio could not start: ${error instanceof Error ? error.message : 'Please enable sound.'}`);
-        });
-      } catch (error) {
+      const audio = alarmAudioRef.current;
+      if (!audio || activeAlarmsRef.current.length > 0) return;
+      audio.loop = false;
+      audio.currentTime = 0;
+      void audio.play().then(() => {
+        setAudioError('');
+      }).catch((error: unknown) => {
         setAudioError(`Alarm audio could not start: ${error instanceof Error ? error.message : 'Please enable sound.'}`);
-      }
+      });
     };
 
     window.addEventListener(MEDICATION_ALARM_TEST_EVENT, playTestChime);
@@ -236,6 +248,86 @@ export default function MedicationAlarm() {
   }, [userId]);
 
   useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+
+    let disposed = false;
+    let listenerHandle: { remove: () => Promise<void> } | undefined;
+    void LocalNotifications.addListener('localNotificationActionPerformed', ({ notification }) => {
+      const metadata = getNotificationMetadata(notification.extra);
+      const medicationId = typeof metadata.medicationId === 'string' ? metadata.medicationId : '';
+      if (!medicationId) return;
+
+      const notificationUserId = typeof metadata.userId === 'string' ? metadata.userId : userId;
+      if (userId && notificationUserId && notificationUserId !== userId) return;
+      const date = typeof metadata.scheduledDate === 'string'
+        ? metadata.scheduledDate
+        : getLocalDateTime(new Date()).date;
+      const time = typeof metadata.scheduledTime === 'string' && /^\d{2}:\d{2}$/.test(metadata.scheduledTime)
+        ? metadata.scheduledTime
+        : getLocalDateTime(new Date()).time;
+      const alarmKey = typeof metadata.alarmKey === 'string'
+        ? metadata.alarmKey
+        : JSON.stringify([medicationId, date, time]);
+      const alarmUserId = notificationUserId ?? '';
+      const medication = medicationsRef.current.find(({ id }) => id === medicationId);
+      const name = medication?.name
+        ?? (typeof metadata.medicationName === 'string' ? metadata.medicationName : notification.title);
+      const activeAlarm: ActiveAlarm = {
+        key: alarmKey,
+        medicationId,
+        userId: alarmUserId,
+        name,
+        time,
+        notificationId: notification.id,
+      };
+
+      setActiveAlarms((alarms) => {
+        const alreadyActive = alarms.some(({ key }) => key === alarmKey);
+        return alreadyActive
+          ? alarms.map((alarm) => alarm.key === alarmKey ? { ...alarm, notificationId: notification.id } : alarm)
+          : [...alarms, activeAlarm];
+      });
+      if (alarmUserId) {
+        triggeredKeysRef.current.add(alarmKey);
+        setTriggeredKeys(new Set(triggeredKeysRef.current));
+        try {
+          window.localStorage.setItem(
+            `${STORAGE_KEY_PREFIX}${alarmUserId}`,
+            JSON.stringify([...triggeredKeysRef.current]),
+          );
+          setStorageWarning('');
+        } catch (error) {
+          setStorageWarning(
+            `Alarm history could not be saved to this device: ${error instanceof Error ? error.message : 'Storage is unavailable.'}`,
+          );
+        }
+        void cancelAlarmNotifications(alarmUserId, alarmKey, notification.id).catch((error: unknown) => {
+          setListenerError(`Follow-up medication alarms could not be cancelled: ${error instanceof Error ? error.message : 'Please try again.'}`);
+        });
+      }
+    }).then((handle) => {
+      if (disposed) {
+        void handle.remove().catch((error: unknown) => {
+          console.warn('Medication notification action listener could not be removed.', error);
+        });
+      } else {
+        listenerHandle = handle;
+      }
+    }).catch((error: unknown) => {
+      setListenerError(`Medication notification actions could not be loaded: ${error instanceof Error ? error.message : 'Please try again.'}`);
+    });
+
+    return () => {
+      disposed = true;
+      if (listenerHandle) {
+        void listenerHandle.remove().catch((error: unknown) => {
+          console.warn('Medication notification action listener could not be removed.', error);
+        });
+      }
+    };
+  }, [userId]);
+
+  useEffect(() => {
     if (!userId || !historyReady) return;
 
     const checkAlarms = () => {
@@ -267,6 +359,7 @@ export default function MedicationAlarm() {
         newlyTriggered.push({
           key,
           medicationId: medication.id,
+          userId,
           name: medication.name,
           time,
         });
@@ -297,62 +390,42 @@ export default function MedicationAlarm() {
   useEffect(() => {
     if (activeAlarms.length === 0) {
       setAudioError('');
+      const audio = alarmAudioRef.current;
+      if (audio) {
+        audio.pause();
+        audio.currentTime = 0;
+        audio.loop = true;
+      }
       return;
     }
 
-    let stopped = false;
-    let resumePending = false;
-    let resumeTimeout: number | undefined;
+    const audio = alarmAudioRef.current;
+    if (!audio) {
+      setAudioError('Alarm audio is unavailable in this browser.');
+      return;
+    }
 
-    const playChime = () => {
-      try {
-        const audioContext = getOrCreateAudioContext(audioContextRef);
-        if (audioContext.state === 'running') {
-          setAudioError('');
-          playChimeSequence(audioContext);
-          return;
-        }
-        if (resumePending) return;
-
-        resumePending = true;
-        void audioContext.resume().then(() => {
-          resumePending = false;
-          if (resumeTimeout !== undefined) window.clearTimeout(resumeTimeout);
-          if (stopped) return;
-          if (audioContext?.state === 'running') {
-            setAudioError('');
-            playChimeSequence(audioContext);
-          } else {
-            setAudioError('Your browser has paused alarm audio. Enable sound to try again.');
-          }
-        }).catch((error: unknown) => {
-          resumePending = false;
-          if (resumeTimeout !== undefined) window.clearTimeout(resumeTimeout);
-          if (!stopped) {
-            setAudioError(`Alarm audio could not start: ${error instanceof Error ? error.message : 'Please enable sound.'}`);
-          }
-        });
-        resumeTimeout = window.setTimeout(() => {
-          if (!stopped && audioContext?.state !== 'running') {
-            setAudioError('Your browser has paused alarm audio. Enable sound to try again.');
-          }
-        }, 1500);
-      } catch (error) {
-        setAudioError(`Alarm audio could not start: ${error instanceof Error ? error.message : 'Please enable sound.'}`);
-      }
-    };
-
-    playChime();
-    const intervalId = window.setInterval(playChime, 2800);
+    audio.loop = true;
+    audio.currentTime = 0;
+    void audio.play().then(() => {
+      setAudioError('');
+    }).catch((error: unknown) => {
+      setAudioError(`Alarm audio could not start: ${error instanceof Error ? error.message : 'Please enable sound.'}`);
+    });
     return () => {
-      stopped = true;
-      window.clearInterval(intervalId);
-      if (resumeTimeout !== undefined) window.clearTimeout(resumeTimeout);
+      audio.pause();
+      audio.currentTime = 0;
     };
   }, [activeAlarms.length, audioRetry]);
 
-  const dismissAlarm = (alarmKey: string) => {
-    setActiveAlarms((alarms) => alarms.filter((alarm) => alarm.key !== alarmKey));
+  const dismissAlarm = (alarm: ActiveAlarm) => {
+    setActiveAlarms((alarms) => alarms.filter((activeAlarm) => activeAlarm.key !== alarm.key));
+    const alarmUserId = alarm.userId || userId;
+    if (alarmUserId) {
+      void cancelAlarmNotifications(alarmUserId, alarm.key, alarm.notificationId).catch((error: unknown) => {
+        setListenerError(`Follow-up medication alarms could not be cancelled: ${error instanceof Error ? error.message : 'Please try again.'}`);
+      });
+    }
   };
 
   if (activeAlarms.length === 0 && !listenerError && !storageWarning && !audioError) return null;
@@ -397,7 +470,7 @@ export default function MedicationAlarm() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => dismissAlarm(alarm.key)}
+                    onClick={() => dismissAlarm(alarm)}
                     className="rounded-full bg-[#c97b76] px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-[#b96d68] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c97b76] focus-visible:ring-offset-2"
                   >
                     Dismiss / Taken
