@@ -81,6 +81,18 @@ function getNotificationMetadata(value: unknown) {
   return value as Record<string, unknown>;
 }
 
+function hasNativeAlarmBridge() {
+  if (
+    typeof window === 'undefined'
+    || !Capacitor.isNativePlatform()
+    || Capacitor.getPlatform() !== 'android'
+  ) {
+    return false;
+  }
+  const nativeAlarm = (window as Window & { NativeAlarm?: { scheduleAlarm?: unknown } }).NativeAlarm;
+  return typeof nativeAlarm?.scheduleAlarm === 'function';
+}
+
 async function cancelAlarmNotifications(userId: string, alarmKey: string, notificationId?: number) {
   if (!Capacitor.isNativePlatform()) return;
 
@@ -328,7 +340,7 @@ export default function MedicationAlarm() {
   }, [userId]);
 
   useEffect(() => {
-    if (!userId || !historyReady) return;
+    if (!userId || !historyReady || hasNativeAlarmBridge()) return;
 
     const checkAlarms = () => {
       const { date, day, time } = getLocalDateTime(new Date());

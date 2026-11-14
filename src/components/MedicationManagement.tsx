@@ -36,6 +36,7 @@ type Medication = {
   timingMode: TimingMode | null;
   commonTimes: string[];
   customTimes: Partial<Record<Weekday, string[]>>;
+  nativeAlarmIds: number[];
 };
 
 type TimingDraft = {
@@ -46,6 +47,24 @@ type TimingDraft = {
   timingMode: TimingMode | null;
   commonTimes: string[];
   customTimes: Partial<Record<Weekday, string[]>>;
+};
+
+type NativeAlarmBridge = {
+  scheduleAlarm(id: number, triggerAtMillis: number, medName: string, timeText: string): boolean;
+  cancelAlarm(id: number): boolean;
+};
+
+type UpcomingMedicationAlarm = {
+  dateKey: string;
+  time: string;
+  at: Date;
+};
+
+type NativeMedicationAlarm = {
+  id: number;
+  triggerAtMillis: number;
+  medName: string;
+  timeText: string;
 };
 
 const emptyTimingDraft: TimingDraft = {
@@ -80,6 +99,17 @@ function getCustomTimes(value: unknown): Partial<Record<Weekday, string[]>> {
 function getNotificationMetadata(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null) return {};
   return value as Record<string, unknown>;
+}
+
+function getNativeAlarmBridge(): NativeAlarmBridge | null {
+  if (
+    typeof window === 'undefined'
+    || !Capacitor.isNativePlatform()
+    || Capacitor.getPlatform() !== 'android'
+  ) {
+    return null;
+  }
+  return (window as Window & { NativeAlarm?: NativeAlarmBridge }).NativeAlarm ?? null;
 }
 
 function getSavedTimingDraft(medication: Medication): TimingDraft {
@@ -177,7 +207,74 @@ function getMedicationNotificationIds(
   );
 }
 
+function getUpcomingMedicationAlarms(timing: TimingDraft): UpcomingMedicationAlarm[] {
+  const alarms: UpcomingMedicationAlarm[] = [];
+  const now = new Date();
+
+  for (let dayOffset = 0; dayOffset < 14; dayOffset += 1) {
+    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset);
+    const dateKey = [
+      date.getFullYear(),
+      String(date.getMonth() + 1).padStart(2, '0'),
+      String(date.getDate()).padStart(2, '0'),
+    ].join('-');
+    if (dateKey < timing.fromDate || (!timing.indefinite && timing.toDate && dateKey > timing.toDate)) continue;
+
+    const day = weekdays[(date.getDay() + 6) % 7];
+    if (!timing.days.includes(day)) continue;
+    const times = timing.timingMode === 'common'
+      ? timing.commonTimes
+      : timing.timingMode === 'custom'
+        ? timing.customTimes[day] ?? []
+        : [];
+    const seenTimes = new Set<string>();
+
+    for (const time of times) {
+      if (seenTimes.has(time)) continue;
+      seenTimes.add(time);
+      const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
+      if (!match) throw new Error(`The saved time "${time}" is not valid.`);
+      const at = new Date(
+        date.getFullYear(),
+        date.getMonth(),
+        date.getDate(),
+        Number(match[1]),
+        Number(match[2]),
+      );
+      if (at > now) alarms.push({ dateKey, time, at });
+    }
+  }
+
+  return alarms;
+}
+
+function getNativeMedicationAlarmPlan(
+  userId: string,
+  medication: Medication,
+  timing: TimingDraft,
+): NativeMedicationAlarm[] {
+  const reservedIds = new Set<number>();
+  return getUpcomingMedicationAlarms(timing).map(({ dateKey, time, at }) => ({
+    id: createNotificationId(
+      JSON.stringify([userId, medication.id, dateKey, time]),
+      reservedIds,
+    ),
+    triggerAtMillis: at.getTime(),
+    medName: medication.name,
+    timeText: formatTime(time),
+  }));
+}
+
 async function cancelMedicationNotifications(userId: string, medication: Medication) {
+  const nativeAlarmBridge = getNativeAlarmBridge();
+  if (nativeAlarmBridge) {
+    for (const id of medication.nativeAlarmIds) {
+      if (!nativeAlarmBridge.cancelAlarm(id)) {
+        throw new Error(`Unable to cancel native medication alarm ${id}.`);
+      }
+    }
+  }
+
   const entries = getNotificationEntries(
     medication.days,
     medication.timingMode,
@@ -221,66 +318,35 @@ async function scheduleMedicationNotifications(
 ) {
   const notifications: LocalNotificationSchema[] = [];
   const reservedIds = new Set<number>();
-  const now = new Date();
-
-  for (let dayOffset = 0; dayOffset < 14; dayOffset += 1) {
-    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset);
-    const dateKey = [
-      date.getFullYear(),
-      String(date.getMonth() + 1).padStart(2, '0'),
-      String(date.getDate()).padStart(2, '0'),
-    ].join('-');
-    if (dateKey < timing.fromDate || (!timing.indefinite && timing.toDate && dateKey > timing.toDate)) continue;
-
-    const day = weekdays[(date.getDay() + 6) % 7];
-    if (!timing.days.includes(day)) continue;
-
-    const times = timing.timingMode === 'common'
-      ? timing.commonTimes
-      : timing.timingMode === 'custom'
-        ? timing.customTimes[day] ?? []
-        : [];
-    for (const time of times) {
-      const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
-      if (!match) throw new Error(`The saved time "${time}" is not valid.`);
-      const at = new Date(
-        date.getFullYear(),
-        date.getMonth(),
-        date.getDate(),
-        Number(match[1]),
-        Number(match[2]),
-      );
-      if (at <= now) continue;
-
-      const alarmKey = JSON.stringify([medication.id, dateKey, time]);
-      for (let followUpMinute = 0; followUpMinute < 3; followUpMinute += 1) {
-        notifications.push({
-          id: createNotificationId(
-            JSON.stringify([userId, medication.id, dateKey, time, followUpMinute]),
-            reservedIds,
-          ),
-          title: 'Medication Reminder',
-          body: `Time to take ${medication.name}`,
-          channelId: 'med-alarms-v2',
-          sound: 'alarm.mp3',
-          schedule: {
-            at: new Date(at.getTime() + followUpMinute * 60_000),
-            allowWhileIdle: true,
-          },
-          isExactNotification: true,
-          isExactMandatory: true,
-          ongoing: true,
-          autoCancel: false,
-          extra: {
-            userId,
-            medicationId: medication.id,
-            medicationName: medication.name,
-            scheduledDate: dateKey,
-            scheduledTime: time,
-            alarmKey,
-          },
-        });
-      }
+  for (const { dateKey, time, at } of getUpcomingMedicationAlarms(timing)) {
+    const alarmKey = JSON.stringify([medication.id, dateKey, time]);
+    for (let followUpMinute = 0; followUpMinute < 3; followUpMinute += 1) {
+      notifications.push({
+        id: createNotificationId(
+          JSON.stringify([userId, medication.id, dateKey, time, followUpMinute]),
+          reservedIds,
+        ),
+        title: 'Medication Reminder',
+        body: `Time to take ${medication.name}`,
+        channelId: 'med-alarms-v2',
+        sound: 'alarm.mp3',
+        schedule: {
+          at: new Date(at.getTime() + followUpMinute * 60_000),
+          allowWhileIdle: true,
+        },
+        isExactNotification: true,
+        isExactMandatory: true,
+        ongoing: true,
+        autoCancel: false,
+        extra: {
+          userId,
+          medicationId: medication.id,
+          medicationName: medication.name,
+          scheduledDate: dateKey,
+          scheduledTime: time,
+          alarmKey,
+        },
+      });
     }
   }
 
@@ -463,6 +529,9 @@ export default function MedicationManagement() {
             timingMode: data.timingMode === 'common' || data.timingMode === 'custom' ? data.timingMode : null,
             commonTimes: getStringArray(data.commonTimes),
             customTimes: getCustomTimes(data.customTimes),
+            nativeAlarmIds: Array.isArray(data.nativeAlarmIds)
+              ? data.nativeAlarmIds.filter((value): value is number => Number.isInteger(value) && value > 0)
+              : [],
           }];
         });
         userMedications.sort((first, second) =>
@@ -500,6 +569,7 @@ export default function MedicationManagement() {
         name,
         createdAt: serverTimestamp(),
         hasTimings: false,
+        nativeAlarmIds: [],
       });
       setMedicationName('');
       setIsFormOpen(false);
@@ -600,6 +670,7 @@ export default function MedicationManagement() {
     let timingsSaved = false;
     try {
       const isNativePlatform = Capacitor.isNativePlatform();
+      const nativeAlarmBridge = getNativeAlarmBridge();
       if (isNativePlatform) {
         await cancelMedicationNotifications(user.uid, medication);
       }
@@ -610,7 +681,8 @@ export default function MedicationManagement() {
         commonTimes,
         customTimes,
       };
-      await updateDoc(doc(db, 'users', user.uid, 'medications', medication.id), {
+      const medicationRef = doc(db, 'users', user.uid, 'medications', medication.id);
+      const timingUpdate = {
         hasTimings: true,
         startDate: timingToSave.fromDate,
         endDate: timingToSave.toDate,
@@ -619,9 +691,49 @@ export default function MedicationManagement() {
         timingMode: timingToSave.timingMode,
         commonTimes,
         customTimes,
-      });
-      timingsSaved = true;
-      if (isNativePlatform) {
+      };
+
+      if (nativeAlarmBridge) {
+        const nativeAlarmPlan = getNativeMedicationAlarmPlan(user.uid, medication, timingToSave);
+        await updateDoc(medicationRef, {
+          ...timingUpdate,
+          nativeAlarmIds: nativeAlarmPlan.map(({ id }) => id),
+        });
+        timingsSaved = true;
+        try {
+          for (const alarm of nativeAlarmPlan) {
+            if (!nativeAlarmBridge.scheduleAlarm(
+              alarm.id,
+              alarm.triggerAtMillis,
+              alarm.medName,
+              alarm.timeText,
+            )) {
+              throw new Error(`Unable to schedule native alarm for ${alarm.timeText}.`);
+            }
+          }
+        } catch (scheduleError) {
+          let cleanupFailed = false;
+          for (const alarm of nativeAlarmPlan) {
+            try {
+              if (!nativeAlarmBridge.cancelAlarm(alarm.id)) cleanupFailed = true;
+            } catch (cancelError) {
+              cleanupFailed = true;
+              console.error(`Unable to cancel partially scheduled native alarm ${alarm.id}.`, cancelError);
+            }
+          }
+          if (cleanupFailed) {
+            const reason = scheduleError instanceof Error ? scheduleError.message : 'Native scheduling failed.';
+            throw new Error(`${reason} Some alarms may still be scheduled; edit or delete the medication to retry cancellation.`);
+          }
+          throw scheduleError;
+        }
+        window.alert(`Scheduled ${nativeAlarmPlan.length} native full-screen alarms.`);
+      } else {
+        await updateDoc(medicationRef, timingUpdate);
+        timingsSaved = true;
+      }
+
+      if (isNativePlatform && !nativeAlarmBridge) {
         const scheduledCount = await scheduleMedicationNotifications(user.uid, medication, timingToSave);
         window.alert(`Scheduled ${scheduledCount} phone alarms.`);
       }
