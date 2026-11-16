@@ -25,10 +25,8 @@ export default function AuthScreen() {
     try {
       if (mode === 'signup') {
         await createUserWithEmailAndPassword(auth, email, password);
-        navigate('/onboarding');
       } else {
         await signInWithEmailAndPassword(auth, email, password);
-        navigate('/dashboard');
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Something went wrong. Please try again.';
