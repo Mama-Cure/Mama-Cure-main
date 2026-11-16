@@ -7,6 +7,7 @@ import Intro from '@/components/Intro';
 import Landing from '@/components/Landing';
 import AuthScreen from '@/components/AuthScreen';
 import Dashboard from '@/components/Dashboard';
+import AppointmentHub from '@/components/AppointmentHub';
 import DocumentScanner from '@/components/DocumentScanner';
 import MedicationManagement from '@/components/MedicationManagement';
 import MedicationAlarm from '@/components/MedicationAlarm';
@@ -171,6 +172,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute hasCompletedOnboarding={hasCompletedOnboarding}>
             <DocumentScanner />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/appointments"
+        element={
+          <ProtectedRoute hasCompletedOnboarding={hasCompletedOnboarding}>
+            <AppointmentHub />
           </ProtectedRoute>
         }
       />
