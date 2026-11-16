@@ -1,4 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { LocalNotifications } from '@capacitor/local-notifications';
 import {
   addDoc,
   collection,
@@ -44,8 +46,78 @@ const blankAppointment: AppointmentFields = {
   notes: '',
 };
 
+const APPOINTMENT_NOTIFICATION_CHANNEL_ID = 'appointment-day-reminders';
+const BROWSER_NOTIFICATION_STORAGE_PREFIX = 'appointment-day-notification:';
+
+function isAndroidNativePlatform() {
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+}
+
+function createAppointmentNotificationId(appointmentId: string) {
+  let hash = 2166136261;
+  for (const character of appointmentId) {
+    hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
+  }
+  return (hash >>> 0) % 2147483647 + 1;
+}
+
+function getLocalDateKey(date: Date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0'),
+  ].join('-');
+}
+
 function getAppointmentDateTime(appointment: Appointment) {
   return new Date(`${appointment.date}T${appointment.time}`).getTime();
+}
+
+async function clearAppointmentDayNotification(appointmentId: string) {
+  if (!isAndroidNativePlatform()) return;
+
+  const notificationId = createAppointmentNotificationId(appointmentId);
+  const [pending, delivered] = await Promise.all([
+    LocalNotifications.getPending(),
+    LocalNotifications.getDeliveredNotifications(),
+  ]);
+  if (pending.notifications.some(({ id }) => id === notificationId)) {
+    await LocalNotifications.cancel({ notifications: [{ id: notificationId }] });
+  }
+  if (delivered.notifications.some(({ id }) => id === notificationId)) {
+    await LocalNotifications.removeDeliveredNotificationsById({ ids: [notificationId] });
+  }
+}
+
+async function scheduleAppointmentDayNotification(
+  appointmentId: string,
+  appointment: AppointmentFields,
+) {
+  if (!isAndroidNativePlatform()) return;
+
+  await clearAppointmentDayNotification(appointmentId);
+  const appointmentMidnight = new Date(`${appointment.date}T00:00:00`);
+  if (Number.isNaN(appointmentMidnight.getTime()) || appointmentMidnight.getTime() <= Date.now()) return;
+
+  await LocalNotifications.createChannel({
+    id: APPOINTMENT_NOTIFICATION_CHANNEL_ID,
+    name: 'Appointment Reminders',
+    description: 'Standard reminders for appointments scheduled today',
+    importance: 3,
+    visibility: 1,
+  });
+  await LocalNotifications.schedule({
+    notifications: [{
+      id: createAppointmentNotificationId(appointmentId),
+      title: 'Appointment Today',
+      body: `You have an appointment today with ${appointment.doctorName} at ${formatAppointmentTime(appointment.date, appointment.time)}`,
+      schedule: { at: appointmentMidnight },
+      channelId: APPOINTMENT_NOTIFICATION_CHANNEL_ID,
+      ongoing: false,
+      autoCancel: true,
+      extra: { appointmentId },
+    }],
+  });
 }
 
 function formatAppointmentDate(date: string) {
@@ -177,6 +249,7 @@ export default function AppointmentManagement({
   const prefilledLocation = initialValues?.location;
   const { user } = useAuth();
   const [appointments, setAppointments] = useState<Appointment[]>([]);
+  const [appointmentsForUserId, setAppointmentsForUserId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [formValues, setFormValues] = useState<AppointmentFields>({
@@ -193,6 +266,7 @@ export default function AppointmentManagement({
   useEffect(() => {
     if (!user) {
       setAppointments([]);
+      setAppointmentsForUserId(null);
       setIsLoading(false);
       return;
     }
@@ -229,6 +303,7 @@ export default function AppointmentManagement({
           }];
         });
         setAppointments(userAppointments);
+        setAppointmentsForUserId(user.uid);
         setIsLoading(false);
       },
       (loadError) => {
@@ -247,6 +322,34 @@ export default function AppointmentManagement({
     }));
     setIsFormOpen(true);
   }, [prefilledDoctorName, prefilledLocation]);
+
+  useEffect(() => {
+    if (isLoading || !user || appointmentsForUserId !== user.uid || Capacitor.isNativePlatform()) return;
+    if (typeof window === 'undefined' || !('Notification' in window)) return;
+    if (window.Notification.permission !== 'granted') return;
+
+    const today = getLocalDateKey(new Date());
+    const todaysAppointments = appointments.filter(
+      (appointment) => appointment.date === today && !appointment.completed,
+    );
+    if (todaysAppointments.length === 0) return;
+
+    const storageKey = `${BROWSER_NOTIFICATION_STORAGE_PREFIX}${user.uid}:${today}`;
+    try {
+      if (window.localStorage.getItem(storageKey)) return;
+      new window.Notification('Appointments Today', {
+        body: todaysAppointments.length === 1
+          ? 'You have an appointment scheduled for today.'
+          : `You have ${todaysAppointments.length} appointments scheduled for today.`,
+        tag: storageKey,
+      });
+      window.localStorage.setItem(storageKey, 'shown');
+    } catch (notificationError) {
+      setError(
+        `Unable to show appointment notification: ${notificationError instanceof Error ? notificationError.message : 'Please check browser notification settings.'}`,
+      );
+    }
+  }, [appointments, appointmentsForUserId, isLoading, user]);
 
   const updateFormValue = (field: keyof AppointmentFields, value: string) => {
     setFormValues((current) => ({ ...current, [field]: value }));
@@ -279,18 +382,28 @@ export default function AppointmentManagement({
     setSaving(true);
     setError('');
     try {
+      let appointmentId = editingAppointmentId;
       if (editingAppointmentId) {
         await updateDoc(doc(db, 'users', user.uid, 'appointments', editingAppointmentId), {
           ...values,
           updatedAt: serverTimestamp(),
         });
       } else {
-        await addDoc(collection(db, 'users', user.uid, 'appointments'), {
+        const appointmentRef = await addDoc(collection(db, 'users', user.uid, 'appointments'), {
           userId: user.uid,
           ...values,
           completed: false,
           createdAt: serverTimestamp(),
         });
+        appointmentId = appointmentRef.id;
+      }
+
+      try {
+        if (appointmentId) await scheduleAppointmentDayNotification(appointmentId, values);
+      } catch (notificationError) {
+        setError(
+          `Appointment saved, but its day-of notification could not be scheduled: ${notificationError instanceof Error ? notificationError.message : 'Please try again.'}`,
+        );
       }
       resetForm();
     } catch (saveError) {
@@ -322,6 +435,7 @@ export default function AppointmentManagement({
     setUpdatingAppointmentId(appointment.id);
     setError('');
     try {
+      await clearAppointmentDayNotification(appointment.id);
       await updateDoc(doc(db, 'users', user.uid, 'appointments', appointment.id), {
         completed: true,
         completedAt: serverTimestamp(),
@@ -343,6 +457,7 @@ export default function AppointmentManagement({
     setDeletingAppointmentId(appointment.id);
     setError('');
     try {
+      await clearAppointmentDayNotification(appointment.id);
       await deleteDoc(doc(db, 'users', user.uid, 'appointments', appointment.id));
       if (editingAppointmentId === appointment.id) resetForm();
     } catch (deleteError) {
